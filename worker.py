@@ -8,7 +8,7 @@ from auth import get_target_token
 from network import resolve_target_ips, filter_ips, perform_request_curl_ip
 from results import save_result
 from redis_utils import write_latest_redis
-from connectivity import IS_ONLINE
+from connectivity import is_online
 
 logger = logging.getLogger("robust_poller")
 
@@ -57,7 +57,7 @@ class TargetWorker(threading.Thread):
             logger.exception("Failed to obtain DB connection for worker %s", self.tid)
             # continue; we'll try again inside the loop
 
-        interval = self.target.get('check_interval', 60) or 60
+        interval = max(1, int(self.target.get('check_interval', 60) or 60))
         while not self.stopped():
             try:
                 # refresh target from DB - keep pattern of checking active flag
@@ -71,12 +71,15 @@ class TargetWorker(threading.Thread):
                     fresh = fetch_target(db, self.tid)
                     if fresh:
                         self.target.update(fresh)
-                        interval = self.target.get('check_interval', 60) or 60
+                        interval = max(1, int(self.target.get('check_interval', 60) or 60))
+                    else:
+                        logger.info("Target %s removed from DB; worker exiting", self.tid)
+                        break
 
                 if self.target.get('active') != 1:
                     logger.info("Target %s marked inactive; worker sleeping", self.tid)
                 else:
-                    if not IS_ONLINE:
+                    if not is_online():
                         info = {"http_code": -2, "total_time": 0, "error_str": "no connectivity", "ip_version": 4, "ip_index": 0, "ip_address": None}
                         if db:
                             save_result(db, self.tid, info, "", b"")

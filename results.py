@@ -9,7 +9,8 @@ logger = logging.getLogger("robust_poller")
 
 def save_result(conn, target_id, info, headers_text, body_bytes):
     http_code = info.get('http_code')
-    body_text = to_text(body_bytes)
+    body_text = to_text(body_bytes) or ''
+    headers_text = headers_text or ''
     curl_info_json = json.dumps(info, default=str)
 
     with conn.cursor() as cur:

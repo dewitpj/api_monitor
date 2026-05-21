@@ -4,6 +4,7 @@ import io
 import json
 import time
 import logging
+from urllib.parse import urlparse
 from config import USER_AGENT, CURL_TIMEOUT, CURL_CONN_TIMEOUT
 from utils import to_text
 
@@ -40,8 +41,21 @@ info_options = {
     "filetime": pycurl.INFO_FILETIME,
 }
 
+def parse_hostname(url):
+    if not url:
+        return None
+    if '://' not in url:
+        url = 'http://' + url
+    parsed = urlparse(url)
+    return parsed.hostname
+
+
 def resolve_target_ips(target):
-    hostname = target['url'].split('/')[2]  # crude but works for http(s)://host/...
+    hostname = parse_hostname(target.get('url'))
+    if not hostname:
+        logger.debug("Invalid target URL for DNS resolution: %s", target.get('url'))
+        return []
+
     try:
         addrinfo = socket.getaddrinfo(hostname, None)
     except Exception as e:
@@ -55,7 +69,7 @@ def resolve_target_ips(target):
             ips.append((ip, 4))
         elif family == socket.AF_INET6:
             ips.append((ip, 6))
-    return list(dict.fromkeys(ips))  # deduplicate
+    return list(dict.fromkeys(ips))
 
 def filter_ips(target, ips):
     result = []
@@ -73,7 +87,7 @@ def perform_request_curl_ip(target, ip, ip_version, ip_index, extra_headers=None
     body_buffer = io.BytesIO()
     c = pycurl.Curl()
     url = target['url']
-    c.setopt(pycurl.URL, url.encode('utf-8'))
+    c.setopt(pycurl.URL, url)
     c.setopt(pycurl.USERAGENT, USER_AGENT)
     c.setopt(pycurl.FOLLOWLOCATION, True)
     c.setopt(pycurl.MAXREDIRS, 3)
@@ -81,10 +95,9 @@ def perform_request_curl_ip(target, ip, ip_version, ip_index, extra_headers=None
     c.setopt(pycurl.TIMEOUT, CURL_TIMEOUT)
     c.setopt(pycurl.WRITEFUNCTION, body_buffer.write)
 
-    # Force connection to a specific IP
-    hostname = url.split('/')[2]
-    # add both common ports; pycurl ignores ones that don't apply
-    c.setopt(pycurl.RESOLVE, [f"{hostname}:443:{ip}", f"{hostname}:80:{ip}"])
+    hostname = parse_hostname(url)
+    if hostname:
+        c.setopt(pycurl.RESOLVE, [f"{hostname}:443:{ip}", f"{hostname}:80:{ip}"])
 
     def header_func(header_line):
         header_buffer.append(header_line.decode('utf-8', 'replace'))
@@ -93,16 +106,14 @@ def perform_request_curl_ip(target, ip, ip_version, ip_index, extra_headers=None
     method = (target.get('http_method') or 'GET').upper()
     if method == 'POST':
         c.setopt(pycurl.POST, 1)
-        if target.get('post_body'):
+        if target.get('post_body') is not None:
             b = target['post_body']
             if isinstance(b, str):
                 b = b.encode('utf-8')
             c.setopt(pycurl.POSTFIELDS, b)
-        else:
-            c.setopt(pycurl.POSTFIELDS, "{}")
     elif method in ('PUT', 'DELETE'):
         c.setopt(pycurl.CUSTOMREQUEST, method)
-        if target.get('post_body'):
+        if target.get('post_body') is not None:
             b = target['post_body']
             if isinstance(b, str):
                 b = b.encode('utf-8')

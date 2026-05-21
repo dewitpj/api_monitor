@@ -5,19 +5,13 @@ from database import get_db_conn, fetch_targets
 from redis_utils import get_redis
 from worker import TargetWorker
 from connectivity import connectivity_loop
+from config import CHECK_NEW_TARGETS_INTERVAL, WORKER_RESTART_BACKOFF_BASE, WORKER_RESTART_MAX_BACKOFF, WORKER_RESTART_WINDOW, WORKER_MAX_RESTARTS_IN_WINDOW
 
 logger = logging.getLogger("robust_poller")
 
 # Global state
 threads_lock = threading.Lock()
 active_workers = {}  # tid -> TargetWorker
-
-# Config
-CHECK_NEW_TARGETS_INTERVAL = 60
-WORKER_RESTART_BACKOFF_BASE = 2
-WORKER_RESTART_MAX_BACKOFF = 300
-WORKER_RESTART_WINDOW = 3600
-WORKER_MAX_RESTARTS_IN_WINDOW = 10
 
 class Supervisor(threading.Thread):
     def __init__(self, stop_event):
@@ -58,56 +52,56 @@ class Supervisor(threading.Thread):
                     except Exception:
                         logger.exception("Supervisor redis connect failed; retrying")
 
+                active_target_ids = set()
                 if db:
                     targets = fetch_targets(db)
+                    active_target_ids = {t.get('id') for t in targets}
                     with threads_lock:
                         for t in targets:
                             tid = t.get('id')
-                            if tid not in active_workers or not active_workers[tid].is_alive():
-                                # throttle restarts
-                                now = time.time()
-                                hist = restart_history.get(tid, [])
-                                # purge old entries
-                                hist = [ts for ts in hist if ts > now - WORKER_RESTART_WINDOW]
-                                if len(hist) >= WORKER_MAX_RESTARTS_IN_WINDOW:
-                                    logger.warning("Too many restarts for %s in window; skipping restart", tid)
-                                    restart_history[tid] = hist
-                                    continue
+                            worker = active_workers.get(tid)
+                            if worker and worker.is_alive():
+                                continue
 
-                                # calculate backoff
-                                backoff = WORKER_RESTART_BACKOFF_BASE ** len(hist)
-                                backoff = min(backoff, WORKER_RESTART_MAX_BACKOFF)
-                                if hist:
-                                    logger.info("Backoff %s seconds before restarting worker %s", backoff, tid)
-                                    time.sleep(backoff)
+                            now = time.time()
+                            hist = restart_history.get(tid, [])
+                            hist = [ts for ts in hist if ts > now - WORKER_RESTART_WINDOW]
+                            if len(hist) >= WORKER_MAX_RESTARTS_IN_WINDOW:
+                                logger.warning("Too many restarts for %s in window; skipping restart", tid)
+                                restart_history[tid] = hist
+                                continue
 
-                                # create and start worker
-                                try:
-                                    worker = TargetWorker(t, rconn)
-                                    worker.start()
-                                    active_workers[tid] = worker
-                                    hist.append(now)
-                                    restart_history[tid] = hist
-                                    logger.info("Started worker for %s", tid)
-                                except Exception:
-                                    logger.exception("Failed to start worker for %s", tid)
+                            backoff = WORKER_RESTART_BACKOFF_BASE ** len(hist)
+                            backoff = min(backoff, WORKER_RESTART_MAX_BACKOFF)
 
-                # cleanup workers that are dead
+                            if hist:
+                                logger.info("Backoff %s seconds before restarting worker %s", backoff, tid)
+                                if self.stop_event.wait(backoff):
+                                    break
+
+                            try:
+                                worker = TargetWorker(t, rconn)
+                                worker.start()
+                                active_workers[tid] = worker
+                                hist.append(now)
+                                restart_history[tid] = hist
+                                logger.info("Started worker for %s", tid)
+                            except Exception:
+                                logger.exception("Failed to start worker for %s", tid)
+
                 with threads_lock:
                     for tid, worker in list(active_workers.items()):
-                        if not worker.is_alive():
-                            logger.warning("Worker %s is not alive; removing from active_workers", tid)
-                            try:
-                                worker.stop()
-                            except Exception:
-                                pass
+                        if not worker.is_alive() or tid not in active_target_ids:
+                            if worker.is_alive():
+                                try:
+                                    worker.stop()
+                                except Exception:
+                                    pass
+                            logger.info("Removing worker %s from active_workers", tid)
                             del active_workers[tid]
 
-                # sleep until next check, but wake earlier if stopping
-                for _ in range(CHECK_NEW_TARGETS_INTERVAL):
-                    if self.stop_event.is_set():
-                        break
-                    time.sleep(1)
+                if self.stop_event.wait(CHECK_NEW_TARGETS_INTERVAL):
+                    break
 
             except Exception:
                 logger.exception("Supervisor loop exception; continuing")

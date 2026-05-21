@@ -6,7 +6,7 @@ import io
 import requests
 from urllib.parse import urlencode
 from config import USER_AGENT, CURL_TIMEOUT
-from database import fetch_api_keys
+from database import fetch_api_keys, fetch_target_token
 
 logger = logging.getLogger("robust_poller")
 
@@ -59,19 +59,9 @@ def get_bearer_token(auth_url, keys, payload_type='form', check_method='curl', v
         return None
 
 def get_target_token(conn, target):
-    token = ""
     tid = target.get('id')
-    with conn.cursor() as cur:
-        sql = ("SELECT token FROM tokens WHERE target_id=%s and `expiry`>NOW() "
-               "ORDER BY `tokens`.`expiry` DESC LIMIT 1")
-        logger.debug("Executing SQL: %s", sql)
-        cur.execute(sql, (tid,))
-        db_token = cur.fetchone()
-
-    if not db_token:
-        token = ""
-    else:
-        token = db_token.get('token') or ""
+    db_token = fetch_target_token(conn, tid)
+    token = db_token.get('token') if db_token else ''
 
     if token:
         logger.debug("We got a valid token from the DB for target %s", tid)
