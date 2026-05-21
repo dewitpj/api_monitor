@@ -1,0 +1,4 @@
+pycurl>=7.45.0
+pymysql>=1.0.0
+redis>=4.0.0
+requests>=2.25.0
