@@ -10,7 +10,8 @@ $stats = [
 ];
 
 $recent = $pdo->query(
-    'SELECT ml.polled_at, t.name AS target_name, ml.http_code, ml.total_time
+    'SELECT ml.polled_at, t.name AS target_name, ml.http_code,
+            COALESCE(JSON_UNQUOTE(JSON_EXTRACT(ml.curl_info, "$.total_time")), 0) AS total_time
      FROM monitor_logs ml
      JOIN targets t ON t.id = ml.target_id
      ORDER BY ml.polled_at DESC
