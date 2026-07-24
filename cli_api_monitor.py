@@ -18,9 +18,11 @@ import threading
 import subprocess
 import socket
 import logging
+import os
+import ipaddress
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 import importlib
 
 import pycurl
@@ -55,6 +57,26 @@ CLI_LISTEN_PORT = getattr(_config_module, "CLI_LISTEN_PORT", 5555)
 
 # ==============================
 
+def update_config_from_module():
+    global MYSQL, REDIS, USER_AGENT, POLLER_ID, CLI_LISTEN_ADDR, CLI_LISTEN_PORT
+    global CHECK_NEW_TARGETS_INTERVAL, CURL_TIMEOUT, CURL_CONN_TIMEOUT, CONNECTIVITY_CHECK_INTERVAL
+    global WORKER_RESTART_BACKOFF_BASE, WORKER_RESTART_MAX_BACKOFF, WORKER_RESTART_WINDOW, WORKER_MAX_RESTARTS_IN_WINDOW
+
+    MYSQL = getattr(_config_module, "MYSQL")
+    REDIS = getattr(_config_module, "REDIS")
+    USER_AGENT = getattr(_config_module, "USER_AGENT")
+    POLLER_ID = getattr(_config_module, "POLLER_ID")
+    CLI_LISTEN_ADDR = getattr(_config_module, "CLI_LISTEN_ADDR", CLI_LISTEN_ADDR)
+    CLI_LISTEN_PORT = getattr(_config_module, "CLI_LISTEN_PORT", CLI_LISTEN_PORT)
+    CHECK_NEW_TARGETS_INTERVAL = getattr(_config_module, "CHECK_NEW_TARGETS_INTERVAL", CHECK_NEW_TARGETS_INTERVAL)
+    CONNECTIVITY_CHECK_INTERVAL = getattr(_config_module, "CONNECTIVITY_CHECK_INTERVAL", CONNECTIVITY_CHECK_INTERVAL)
+    WORKER_RESTART_BACKOFF_BASE = getattr(_config_module, "WORKER_RESTART_BACKOFF_BASE", WORKER_RESTART_BACKOFF_BASE)
+    WORKER_RESTART_MAX_BACKOFF = getattr(_config_module, "WORKER_RESTART_MAX_BACKOFF", WORKER_RESTART_MAX_BACKOFF)
+    WORKER_RESTART_WINDOW = getattr(_config_module, "WORKER_RESTART_WINDOW", WORKER_RESTART_WINDOW)
+    WORKER_MAX_RESTARTS_IN_WINDOW = getattr(_config_module, "WORKER_MAX_RESTARTS_IN_WINDOW", WORKER_MAX_RESTARTS_IN_WINDOW)
+    CURL_TIMEOUT = getattr(_config_module, "CURL_TIMEOUT", CURL_TIMEOUT)
+    CURL_CONN_TIMEOUT = getattr(_config_module, "CURL_CONN_TIMEOUT", CURL_CONN_TIMEOUT)
+
 # ---- GLOBAL STATE ----
 IS_ONLINE = False
 threads_lock = threading.Lock()
@@ -62,6 +84,7 @@ active_workers = {}  # tid -> TargetWorker
 supervisor_ref = None   # tuple(stop_event, supervisor_thread)
 cli_server_ref = None   # hold server thread to allow stopping
 shutting_down = False
+daemon_stop_event = threading.Event()
 
 # --- logging setup ---
 logger = logging.getLogger("robust_poller")
@@ -89,7 +112,6 @@ info_options = {
     "header_size": pycurl.HEADER_SIZE,
     "request_size": pycurl.REQUEST_SIZE,
     "ssl_verifyresult": pycurl.SSL_VERIFYRESULT,
-    "ssl_engines": pycurl.OPT_CERTINFO,
     "content_length_download": pycurl.CONTENT_LENGTH_DOWNLOAD,
     "content_length_upload": pycurl.CONTENT_LENGTH_UPLOAD,
     "content_type": pycurl.CONTENT_TYPE,
@@ -100,7 +122,7 @@ info_options = {
     "num_connects": pycurl.NUM_CONNECTS,
     "os_errno": pycurl.OS_ERRNO,
     "ftp_entry_path": pycurl.FTP_ENTRY_PATH,
-    "certinfo": pycurl.OPT_CERTINFO,
+    "certinfo": pycurl.INFO_CERTINFO,
     "filetime": pycurl.INFO_FILETIME,
 }
 
@@ -274,7 +296,13 @@ def get_target_token(conn, target):
 
 # ---- DNS resolution with restrictions ----
 def resolve_target_ips(target):
-    hostname = target['url'].split('/')[2]  # crude but works for http(s)://host/...
+    url = target.get('url') or ''
+    parsed = urlsplit(url)
+    hostname = parsed.hostname
+    if not hostname:
+        logger.debug("resolve_target_ips invalid URL: %s", url)
+        return []
+
     try:
         addrinfo = socket.getaddrinfo(hostname, None)
     except Exception as e:
@@ -433,13 +461,14 @@ def save_result(conn, target_id, info, headers_text, body_bytes):
     http_code = info.get('http_code')
     body_text = to_text(body_bytes)
     curl_info_json = json.dumps(info, default=str)
+    polled_at = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
 
     with conn.cursor() as cur:
         sql = ("INSERT INTO monitor_logs "
                "(target_id, poller_id, polled_at, http_code, curl_info, response_headers, response_body, ip_version, ip_index, ip_address) "
                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)")
         cur.execute(sql,
-            (target_id, POLLER_ID, datetime.now(ZoneInfo("Africa/Johannesburg")).strftime('%Y-%m-%d %H:%M:%S'),
+            (target_id, POLLER_ID, polled_at,
              http_code, curl_info_json, headers_text, body_text,
              info.get('ip_version'), info.get('ip_index'), info.get('ip_address'))
         )
@@ -449,7 +478,7 @@ def write_latest_redis(rconn, target_id, info, headers_text, body_bytes):
     rec = {
         'target_id': target_id,
         'poller_id': POLLER_ID,
-        'polled_at': datetime.now(ZoneInfo("Africa/Johannesburg")).isoformat() + 'Z',
+        'polled_at': datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z'),
         'http_code': info.get('http_code'),
         'total_time': info.get('total_time'),
         'curl_info': info,
@@ -918,18 +947,13 @@ def stop_supervisor():
 
 def reload_config_and_restart_supervisor():
     """Reload config.py and update global names, then restart supervisor thread"""
-    global _config_module, MYSQL, REDIS, USER_AGENT, POLLER_ID, CLI_LISTEN_ADDR, CLI_LISTEN_PORT
+    global _config_module
     logger.info("Reloading config.py")
     try:
         _config_module = importlib.reload(_config_module)
-        # rebind commonly used names
-        MYSQL = getattr(_config_module, "MYSQL")
-        REDIS = getattr(_config_module, "REDIS")
-        USER_AGENT = getattr(_config_module, "USER_AGENT")
-        POLLER_ID = getattr(_config_module, "POLLER_ID")
-        CLI_LISTEN_ADDR = getattr(_config_module, "CLI_LISTEN_ADDR", CLI_LISTEN_ADDR)
-        CLI_LISTEN_PORT = getattr(_config_module, "CLI_LISTEN_PORT", CLI_LISTEN_PORT)
-        logger.info("Config reloaded: MYSQL host=%s REDIS host=%s", MYSQL.get('host'), REDIS.get('host'))
+        update_config_from_module()
+        logger.info("Config reloaded: MYSQL host=%s REDIS host=%s CLI %s:%s",
+                    MYSQL.get('host'), REDIS.get('host'), CLI_LISTEN_ADDR, CLI_LISTEN_PORT)
     except Exception:
         logger.exception("Failed to reload config.py")
         raise
@@ -937,8 +961,10 @@ def reload_config_and_restart_supervisor():
     # restart supervisor cleanly
     stop_supervisor()
     start_supervisor()
-    # if CLI server address changed, user should restart the daemon to change listen binding
-    logger.info("Supervisor restarted after config reload")
+    # if CLI server address changed, restart CLI server too
+    stop_cli_server()
+    start_cli_server()
+    logger.info("Supervisor and CLI restarted after config reload")
 
 # ---- CLI socket server ----
 def cli_client_handler(conn, addr):
@@ -973,8 +999,22 @@ def cli_server_thread(stop_event):
     global CLI_LISTEN_ADDR, CLI_LISTEN_PORT
     addr = CLI_LISTEN_ADDR
     port = CLI_LISTEN_PORT
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    family = socket.AF_INET
+    try:
+        ipaddress.ip_address(addr)
+        if ':' in addr:
+            family = socket.AF_INET6
+    except ValueError:
+        # Hostname or wildcard: keep AF_INET and let the OS resolve.
+        family = socket.AF_INET
+
+    s = socket.socket(family, socket.SOCK_STREAM)
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    if family == socket.AF_INET6:
+        try:
+            s.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+        except Exception:
+            pass
     s.bind((addr, port))
     s.listen(5)
     logger.info("CLI listening on %s:%s", addr, port)
@@ -1016,6 +1056,7 @@ def stop_cli_server():
 def shutdown_daemon():
     global shutting_down
     shutting_down = True
+    daemon_stop_event.set()
     logger.info("Daemon shutdown requested")
     # stop CLI server
     try:
@@ -1037,11 +1078,9 @@ def shutdown_daemon():
     # give threads a moment to exit
     time.sleep(1)
     logger.info("Shutdown complete")
-    # exit process
-    try:
+    # if running in main thread, exit process
+    if threading.current_thread() is threading.main_thread():
         sys.exit(0)
-    except SystemExit:
-        raise
 
 # ---- main loop ----
 def main_loop():
@@ -1052,8 +1091,8 @@ def main_loop():
     start_cli_server()
 
     try:
-        while True:
-            time.sleep(1)
+        while not daemon_stop_event.wait(1):
+            pass
     except KeyboardInterrupt:
         logger.info("KeyboardInterrupt received - shutting down")
         shutdown_daemon()
