@@ -1,5 +1,6 @@
 import json
 import logging
+import hmac
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from socketserver import ThreadingMixIn
@@ -37,14 +38,17 @@ class RemoteMonitorHandler(BaseHTTPRequestHandler):
         self.send_json({"error": message}, status=status)
 
     def authenticate(self):
-        token = REMOTE_MONITOR_API_TOKEN
+        token = (REMOTE_MONITOR_API_TOKEN or '').strip()
         if not token:
             return True
-        auth_header = self.headers.get("Authorization", "")
-        if auth_header != f"Bearer {token}":
-            self.send_error_json(401, "Unauthorized")
-            return False
-        return True
+
+        auth_header = (self.headers.get("Authorization", "") or '').strip()
+        candidates = {token, f"Bearer {token}"}
+        if auth_header and any(hmac.compare_digest(auth_header, candidate) for candidate in candidates):
+            return True
+
+        self.send_error_json(401, "Unauthorized")
+        return False
 
     def do_GET(self):
         if not self.authenticate():

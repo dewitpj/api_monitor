@@ -12,6 +12,7 @@ try {
     $groups = [];
 }
 
+$error = '';
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $name = trim($_POST['name'] ?? '');
     $url = trim($_POST['url'] ?? '');
@@ -20,16 +21,27 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $active = isset($_POST['active']) && $_POST['active'] == '1' ? 1 : 0;
     $group_id = !empty($_POST['group_id']) ? (int)$_POST['group_id'] : null;
 
-    if ($id) {
-        $stmt = $pdo->prepare('UPDATE targets SET name = ?, url = ?, check_interval = ?, http_method = ?, active = ?, group_id = ? WHERE id = ?');
-        $stmt->execute([$name, $url, $interval, $method, $active, $group_id, $id]);
-    } else {
-        $stmt = $pdo->prepare('INSERT INTO targets (name, url, check_interval, http_method, active, group_id) VALUES (?, ?, ?, ?, ?, ?)');
-        $stmt->execute([$name, $url, $interval, $method, $active, $group_id]);
-    }
+    $allowedMethods = ['GET', 'POST', 'PUT', 'DELETE'];
+    $isValidName = $name !== '';
+    $isValidUrl = filter_var($url, FILTER_VALIDATE_URL) !== false;
+    $isValidInterval = $interval >= 10 && $interval <= 86400;
+    $isValidMethod = in_array($method, $allowedMethods, true);
+    $isValidGroup = $group_id === null || $group_id > 0;
 
-    header('Location: targets.php');
-    exit;
+    if (!$isValidName || !$isValidUrl || !$isValidInterval || !$isValidMethod || !$isValidGroup) {
+        $error = 'Please provide a valid target name, URL, polling interval, method, and optional group.';
+    } else {
+        if ($id) {
+            $stmt = $pdo->prepare('UPDATE targets SET name = ?, url = ?, check_interval = ?, http_method = ?, active = ?, group_id = ? WHERE id = ?');
+            $stmt->execute([$name, $url, $interval, $method, $active, $group_id, $id]);
+        } else {
+            $stmt = $pdo->prepare('INSERT INTO targets (name, url, check_interval, http_method, active, group_id) VALUES (?, ?, ?, ?, ?, ?)');
+            $stmt->execute([$name, $url, $interval, $method, $active, $group_id]);
+        }
+
+        header('Location: targets.php');
+        exit;
+    }
 }
 
 if ($id) {
@@ -49,6 +61,9 @@ require_once __DIR__ . '/header.php';
 </div>
 
 <section class="card card-form">
+  <?php if ($error): ?>
+    <div class="alert alert-error"><?= htmlspecialchars($error) ?></div>
+  <?php endif; ?>
   <form method="post">
     <label for="name">Name</label>
     <input id="name" name="name" value="<?= htmlspecialchars($target['name'] ?? '') ?>" required>

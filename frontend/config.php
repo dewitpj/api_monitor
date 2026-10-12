@@ -5,7 +5,8 @@ $DB_HOST = getenv('API_MONITOR_DB_HOST') ?: '127.0.0.1';
 $DB_PORT = getenv('API_MONITOR_DB_PORT') ?: '3306';
 $DB_NAME = getenv('API_MONITOR_DB_NAME') ?: 'api_monitor';
 $DB_USER = getenv('API_MONITOR_DB_USER') ?: 'api_monitor';
-$DB_PASS = getenv('API_MONITOR_DB_PASS') ?: '9LL3nT6GpZrqxZJY';
+// Read secrets from the environment instead of checking them into source control.
+$DB_PASS = getenv('API_MONITOR_DB_PASS') ?: '';
 
 $options = [
     PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,

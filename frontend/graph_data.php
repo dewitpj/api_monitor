@@ -25,7 +25,10 @@ $windowSeconds = $interval['seconds'];
 $bucketSeconds = $interval['bucket'];
 $minTime = date('Y-m-d H:i:s', time() - $windowSeconds);
 
-$targetId = isset($_GET['target_id']) ? (int)$_GET['target_id'] : 0;
+$targetId = filter_input(INPUT_GET, 'target_id', FILTER_VALIDATE_INT);
+if ($targetId === false || $targetId <= 0) {
+    $targetId = 0;
+}
 if ($targetId <= 0) {
     $stmt = $pdo->prepare('SELECT id FROM targets WHERE active = 1 ORDER BY name LIMIT 1');
     $stmt->execute();
