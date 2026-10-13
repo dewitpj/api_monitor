@@ -6,7 +6,7 @@ MYSQL = {
     'port': int(os.getenv('API_MONITOR_MYSQL_PORT', '3306')),
     'user': os.getenv('API_MONITOR_MYSQL_USER', 'api_monitor'),
     # Keep credentials in environment instead of checking them into source control.
-    'password': os.getenv('API_MONITOR_MYSQL_PASSWORD', ''),
+    'password': os.getenv('API_MONITOR_MYSQL_PASSWORD', '9LL3nT6GpZrqxZJY'),
     'db': os.getenv('API_MONITOR_MYSQL_DB', 'api_monitor'),
     'charset': os.getenv('API_MONITOR_MYSQL_CHARSET', 'utf8mb4'),
 }
